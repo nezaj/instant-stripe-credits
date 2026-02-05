@@ -10,16 +10,21 @@ A simple pattern for adding credit pack purchases to InstantDB apps.
 3. Create/fetch Stripe customer, link to InstantDB user
 4. Redirect to Stripe checkout (one-time payment)
 5. User pays → webhook adds credits to account
-6. Success page syncs eagerly (beats webhook race)
+6. InstantDB real-time subscription updates the UI instantly
 7. User spends credits → server deducts per use
 ```
 
-**The key idea:** Credits live on the user record. Stripe handles payment, our server handles the balance. Both webhook and sync use Stripe session metadata for idempotency.
+**The key idea:** Credits live on the user record. Stripe handles payment, our server handles the balance. The webhook uses Stripe session metadata for idempotency, and InstantDB's real-time subscriptions keep the UI in sync.
 
-## Three Moving Parts
+## Two Moving Parts
 
-**1. Checkout API** — Get or create Stripe customer, create session
+**1. Checkout API** — Verify auth, get or create Stripe customer, create session
 ```ts
+// Verify the caller's identity from their auth token
+const auth = await verifyAuth(request);
+if (auth.error) return auth.error;
+const userId = auth.user.id;
+
 let customerId = user.stripeCustomerId;
 if (!customerId) {
   const customer = await stripe.customers.create({ email: user.email });
@@ -40,8 +45,12 @@ stripe.checkout.sessions.create({
 
 Only one event needed: `checkout.session.completed`. Unlike subscriptions, there's no ongoing lifecycle to track.
 
+The webhook re-fetches the session from Stripe (rather than using the event payload) so the idempotency check works correctly on retries — the event payload's metadata is frozen at creation time and would always bypass the flag.
+
 ```ts
-// checkout.session.completed
+// Re-fetch session for live metadata (event payload is stale on retries)
+const session = await stripe.checkout.sessions.retrieve(event.data.object.id);
+
 if (session.metadata?.creditsProcessed === "true") break; // idempotent
 
 await stripe.checkout.sessions.update(session.id, {
@@ -55,35 +64,29 @@ await adminDb.transact(
 );
 ```
 
-**3. Sync on Success** — Beat the webhook race
-```ts
-useEffect(() => {
-  if (success && sessionId && user) {
-    fetch("/api/stripe/sync", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: user.id, sessionId }),
-    });
-  }
-}, [success, sessionId, user]);
-```
+No separate sync endpoint is needed — InstantDB's real-time subscriptions update the client's balance the moment the webhook writes it.
 
 ## Idempotency
 
-Both webhook and sync share the same guard:
+The webhook guards against duplicate deliveries:
 
-1. Check `session.metadata.creditsProcessed`
-2. If `"true"`, skip — already handled
-3. Otherwise, set it to `"true"` and add credits
+1. Re-fetch the session from Stripe (event payload metadata is stale on retries)
+2. Check `session.metadata.creditsProcessed`
+3. If `"true"`, skip — already handled
+4. Otherwise, set it to `"true"` and add credits
 
-This prevents double-crediting regardless of which runs first or if either runs multiple times.
+This prevents double-crediting if Stripe retries the webhook.
 
 ## Credit Deduction
 
-Credits are spent server-side via the admin SDK:
+Credits are spent server-side via the admin SDK. The user ID comes from a verified auth token, not from the request body:
 
 ```ts
 // POST /api/generate
+const auth = await verifyAuth(request);
+if (auth.error) return auth.error;
+const userId = auth.user.id;
+
 const currentCredits = user.credits || 0;
 if (currentCredits < 1) return 402;
 
@@ -95,7 +98,7 @@ await adminDb.transact([
 ]);
 ```
 
-Credit checks and deductions happen server-side — clients can't manipulate their balance.
+Credit checks and deductions happen server-side with a verified user identity — clients can't manipulate their balance or impersonate other users.
 
 ## Access Control
 
@@ -129,9 +132,12 @@ Use a 100% off coupon to test live without real charges:
 
 ## That's It
 
+- Token-verified auth on all API routes = no user impersonation
 - Stripe customer linked to InstantDB user = repeat purchases work
 - Session metadata flag = idempotent credit fulfillment
+- Webhook re-fetches session = idempotency works on retries
 - Server-side deduction = tamper-proof balance
+- InstantDB real-time subscriptions = instant UI updates after payment
 - InstantDB permissions = users only see their own haikus
 
 See `tutorial.md` for full implementation details.

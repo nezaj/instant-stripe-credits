@@ -113,11 +113,11 @@ function LoginForm() {
 function PurchaseModal({
   isOpen,
   onClose,
-  userId,
+  user,
 }: {
   isOpen: boolean;
   onClose: () => void;
-  userId: string;
+  user: { id: string; refresh_token: string };
 }) {
   const [isLoading, setIsLoading] = useState(false);
 
@@ -126,8 +126,10 @@ function PurchaseModal({
     try {
       const res = await fetch("/api/stripe/checkout", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${user.refresh_token}`,
+        },
       });
 
       const { url, error } = await res.json();
@@ -224,7 +226,7 @@ function HaikuGenerator({
   userData,
   onNeedCredits,
 }: {
-  user: { id: string };
+  user: { id: string; refresh_token: string };
   userData: User | undefined;
   onNeedCredits: () => void;
 }) {
@@ -253,8 +255,11 @@ function HaikuGenerator({
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user.id, topic: topic.trim() }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${user.refresh_token}`,
+        },
+        body: JSON.stringify({ topic: topic.trim() }),
       });
 
       const data = await res.json();
@@ -387,7 +392,6 @@ function MainContent() {
   const searchParams = useSearchParams();
   const success = searchParams.get("success");
   const canceled = searchParams.get("canceled");
-  const sessionId = searchParams.get("session_id");
 
   const { isLoading: authLoading, user } = db.useAuth();
   const { isLoading: dataLoading, data } = db.useQuery(
@@ -397,17 +401,6 @@ function MainContent() {
   const [showPurchaseModal, setShowPurchaseModal] = useState(false);
 
   const userData = data?.$users?.[0];
-
-  // Sync credits with Stripe on success to handle webhook race condition
-  useEffect(() => {
-    if (success && sessionId && user) {
-      fetch("/api/stripe/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: user.id, sessionId }),
-      }).catch(console.error);
-    }
-  }, [success, sessionId, user]);
 
   // Clear URL params after showing toast
   useEffect(() => {
@@ -513,7 +506,7 @@ function MainContent() {
       <PurchaseModal
         isOpen={showPurchaseModal}
         onClose={() => setShowPurchaseModal(false)}
-        userId={user.id}
+        user={user}
       />
     </div>
   );

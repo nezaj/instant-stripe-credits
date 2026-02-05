@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/adminDb";
 import { id } from "@instantdb/admin";
+import { verifyAuth } from "@/lib/auth";
 
 const HAIKU_TEMPLATES = [
   "whispers through the {topic}\nancient echoes dancing soft\nsilence speaks at last",
@@ -17,11 +18,11 @@ function generateHaiku(topic: string): string {
 
 export async function POST(request: NextRequest) {
   try {
-    const { userId, topic: rawTopic } = await request.json();
+    const auth = await verifyAuth(request);
+    if (auth.error) return auth.error;
+    const userId = auth.user.id;
 
-    if (!userId) {
-      return NextResponse.json({ error: "User ID required" }, { status: 400 });
-    }
+    const { topic: rawTopic } = await request.json();
 
     const topic = typeof rawTopic === "string" ? rawTopic.trim() : "";
     if (!topic) {

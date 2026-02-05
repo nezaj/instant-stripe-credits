@@ -1,14 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getStripe, getPriceId } from "@/lib/stripe";
 import { adminDb } from "@/lib/adminDb";
+import { verifyAuth } from "@/lib/auth";
 
 export async function POST(request: NextRequest) {
   try {
-    const { userId } = await request.json();
-
-    if (!userId) {
-      return NextResponse.json({ error: "User ID required" }, { status: 400 });
-    }
+    const auth = await verifyAuth(request);
+    if (auth.error) return auth.error;
+    const userId = auth.user.id;
 
     // Get user from InstantDB
     const { $users } = await adminDb.query({
@@ -43,7 +42,7 @@ export async function POST(request: NextRequest) {
       mode: "payment",
       line_items: [{ price: getPriceId(), quantity: 1 }],
       allow_promotion_codes: true,
-      success_url: `${request.headers.get("origin")}/?success=true&session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `${request.headers.get("origin")}/?success=true`,
       cancel_url: `${request.headers.get("origin")}/?canceled=true`,
       metadata: { instantUserId: userId },
     });

@@ -58,8 +58,9 @@ Client                      Stripe                      Server
   │    "Buy Credits"          │                           │
   │                           │                           │
   │ 2. POST /api/stripe/checkout ───────────────────────▶│
-  │    { userId }             │                           │
-  │                           │                           │ 3. Get/create
+  │    Authorization: Bearer  │                           │
+  │                           │                           │ 3. Verify token,
+  │                           │                           │    get/create
   │                           │                           │    Stripe customer
   │                           │                           │
   │                           │◀─── Create session ───────│
@@ -72,18 +73,11 @@ Client                      Stripe                      Server
   │                           │                           │
   │                           │ 6. Webhook ──────────────▶│
   │                           │    (session.completed)    │
-  │                           │                           │ 7. Check
-  │                           │                           │    idempotency
-  │                           │                           │    flag, add
-  │    ◀── 8. Redirect ───────│                           │    credits
-  │        to /?success=true  │                           │
-  │        &session_id=cs_... │                           │
+  │                           │                           │ 7. Re-fetch session,
+  │    ◀── 8. Redirect ───────│                           │    check idempotency
+  │        to /?success=true  │                           │    flag, add credits
   │                           │                           │
-  │ 9. POST /api/stripe/sync ────────────────────────────▶│ 10. Check flag,
-  │    { userId, sessionId }  │                           │     add credits
-  │    (beat webhook race)    │                           │     if not done
-  │                           │                           │
-  │ 11. Credits updated ◀──── real-time subscription ─────│
+  │ 9. Credits updated ◀───── real-time subscription ─────│
   │                           │                           │
   ▼                           ▼                           ▼
 ```
@@ -94,8 +88,9 @@ Client                      Stripe                      Server
 Client                                               Server
   │                                                     │
   │ 1. POST /api/generate ─────────────────────────────▶│
-  │    { userId, topic }                                │
-  │                                                     │ 2. Check credits
+  │    Authorization: Bearer  │                          │
+  │    { topic }              │                          │ 2. Verify token,
+  │                                                     │    check credits
   │                                                     │    (credits < 1 → 402)
   │                                                     │
   │                                                     │ 3. Generate haiku
@@ -142,6 +137,7 @@ allow: { view: "isAuthor", delete: "isAuthor" }
 bind: ["isAuthor", "auth.id in data.ref('author.id')"]
 ```
 
+- Auth token verified on all API routes → no user impersonation
 - Signed-in user → sees only their own haikus
 - Credit check + deduction happens server-side → can't be bypassed
 
@@ -152,24 +148,28 @@ bind: ["isAuthor", "auth.id in data.ref('author.id')"]
                   │  Payment completes   │
                   └──────────┬───────────┘
                              │
-                  ┌──────────┴───────────┐
-                  │                      │
-                  ▼                      ▼
-           ┌────────────┐        ┌────────────┐
-           │  Webhook   │        │    Sync    │
-           └──────┬─────┘        └──────┬─────┘
-                  │                      │
-                  ▼                      ▼
-           ┌─────────────────────────────────┐
-           │  Check session.metadata         │
-           │  creditsProcessed == "true"?    │
-           └──────────┬──────────────────────┘
-                      │
-              ┌───────┴───────┐
-              │               │
-              ▼               ▼
-           Yes: skip      No: set flag,
-                          add credits
+                             ▼
+                      ┌────────────┐
+                      │  Webhook   │
+                      └──────┬─────┘
+                             │
+                             ▼
+                  ┌─────────────────────┐
+                  │  Re-fetch session   │
+                  │  from Stripe API    │
+                  └──────────┬──────────┘
+                             │
+                             ▼
+                  ┌─────────────────────┐
+                  │  creditsProcessed   │
+                  │  == "true"?         │
+                  └──────────┬──────────┘
+                             │
+                     ┌───────┴───────┐
+                     │               │
+                     ▼               ▼
+                  Yes: skip      No: set flag,
+                                 add credits
 ```
 
-Whichever runs first (webhook or sync) sets `creditsProcessed: "true"` on the Stripe session metadata. The other sees the flag and skips.
+The webhook re-fetches the session from Stripe (rather than using the event payload, which is frozen at creation time). This ensures the `creditsProcessed` flag is checked against live metadata, so retried webhooks correctly skip if credits were already added.

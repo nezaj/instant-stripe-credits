@@ -21,13 +21,18 @@ export async function POST(request: NextRequest) {
   try {
     switch (event.type) {
       case "checkout.session.completed": {
-        const session = event.data.object as Stripe.Checkout.Session;
+        // Re-fetch the session from Stripe to get live metadata.
+        // The event payload's metadata is frozen at creation time,
+        // so retried webhooks would always bypass the idempotency check.
+        const session = await stripe.checkout.sessions.retrieve(
+          (event.data.object as Stripe.Checkout.Session).id
+        );
 
         if (session.payment_status !== "paid") {
           break;
         }
 
-        // Skip if already processed (by sync or a duplicate webhook)
+        // Skip if already processed (by a duplicate webhook)
         if (session.metadata?.creditsProcessed === "true") {
           break;
         }

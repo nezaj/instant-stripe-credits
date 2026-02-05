@@ -3,8 +3,9 @@
 So you've built an app and want to charge per use? This tutorial walks through adding Stripe credit packs with InstantDB for balance tracking.
 
 By the end, you'll have:
+- Token-verified API routes that prevent user impersonation
 - A purchase flow that adds credits to a user's account
-- Idempotent fulfillment via webhook and sync
+- Idempotent webhook fulfillment
 - A server-side API that deducts credits per use
 - Real-time balance updates via InstantDB
 
@@ -15,7 +16,6 @@ Let's get started!
 1. [Updating the schema](#updating-the-schema)
 1. [Creating the checkout flow](#creating-the-checkout-flow)
 1. [Handling webhooks](#handling-webhooks)
-1. [The sync strategy](#the-sync-strategy)
 1. [Spending credits](#spending-credits)
 1. [Protecting content with permissions](#protecting-content-with-permissions)
 1. [Testing your integration](#testing-your-integration)
@@ -30,11 +30,11 @@ Before diving into code, let's understand the flow:
 1. User signs in → Required for credit tracking
 2. User clicks "Buy Credits" → Redirected to Stripe
 3. User pays → Webhook adds credits to account
-4. Success page syncs eagerly → Beats the webhook race
+4. InstantDB real-time subscription → UI updates instantly
 5. User generates haiku → Server deducts 1 credit
 ```
 
-The key insight: credits live on the `$users` record. Stripe handles payment, our server handles the balance. Both webhook and sync use Stripe session metadata to prevent double-crediting.
+The key insight: credits live on the `$users` record. Stripe handles payment, our server handles the balance. The webhook uses Stripe session metadata to prevent double-crediting, and InstantDB's real-time subscriptions keep the UI in sync without any extra polling or sync endpoints.
 
 ## Setting up Stripe
 
@@ -123,26 +123,31 @@ npx instant-cli push schema --yes
 
 ## Creating the checkout flow
 
-The buy button calls our checkout API with the user ID:
+The buy button calls our checkout API, sending the user's auth token so the server can verify their identity:
 
 ```tsx
 async function handlePurchase() {
   const res = await fetch("/api/stripe/checkout", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ userId: user.id }),
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${user.refresh_token}`,
+    },
   });
   const { url } = await res.json();
   window.location.href = url;
 }
 ```
 
-The checkout API route gets or creates a Stripe customer and creates a one-time payment session:
+The checkout API route verifies the auth token, gets or creates a Stripe customer, and creates a one-time payment session:
 
 ```ts
 // src/app/api/stripe/checkout/route.ts
 export async function POST(request: NextRequest) {
-  const { userId } = await request.json();
+  // Verify auth — userId comes from the token, not the request body
+  const auth = await verifyAuth(request);
+  if (auth.error) return auth.error;
+  const userId = auth.user.id;
 
   // Get user from InstantDB
   const { $users } = await adminDb.query({
@@ -168,7 +173,7 @@ export async function POST(request: NextRequest) {
     customer: customerId,
     mode: "payment",
     line_items: [{ price: getPriceId(), quantity: 1 }],
-    success_url: `${origin}/?success=true&session_id={CHECKOUT_SESSION_ID}`,
+    success_url: `${origin}/?success=true`,
     cancel_url: `${origin}/?canceled=true`,
     metadata: { instantUserId: userId },
   });
@@ -176,8 +181,6 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({ url: session.url });
 }
 ```
-
-Note `{CHECKOUT_SESSION_ID}` in the success URL — Stripe replaces this with the actual session ID, which we use for the sync endpoint.
 
 ## Handling webhooks
 
@@ -195,7 +198,11 @@ export async function POST(request: NextRequest) {
 
   switch (event.type) {
     case "checkout.session.completed": {
-      const session = event.data.object;
+      // Re-fetch session for live metadata — the event payload is frozen
+      // at creation time, so retries would always bypass the idempotency check
+      const session = await stripe.checkout.sessions.retrieve(
+        event.data.object.id
+      );
 
       if (session.payment_status !== "paid") break;
 
@@ -227,7 +234,9 @@ export async function POST(request: NextRequest) {
 }
 ```
 
-The idempotency flag (`creditsProcessed`) prevents double-crediting if Stripe retries the webhook.
+**Important:** We re-fetch the session from Stripe rather than using `event.data.object` directly. The event payload's metadata is frozen at creation time — if Stripe retries the webhook, the payload still has the original metadata (without `creditsProcessed`), so the idempotency check would always pass. Re-fetching gives us the live metadata.
+
+Once credits are written, InstantDB's real-time subscriptions push the update to the client immediately — no separate sync endpoint needed.
 
 ### Setting up webhook forwarding
 
@@ -252,67 +261,19 @@ For production, add the endpoint in [Stripe Dashboard](https://dashboard.stripe.
 
 Unlike subscriptions which need multiple events for lifecycle changes, credit packs only need this single event — it fires when a one-time payment completes.
 
-## The sync strategy
-
-Webhooks can be delayed. The success page sync beats the race by checking Stripe directly:
-
-```tsx
-// Client: on success redirect
-useEffect(() => {
-  if (success && sessionId && user) {
-    fetch("/api/stripe/sync", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: user.id, sessionId }),
-    });
-  }
-}, [success, sessionId, user]);
-```
-
-The sync API retrieves the specific checkout session and uses the same idempotency flag:
-
-```ts
-// src/app/api/stripe/sync/route.ts
-export async function POST(request: NextRequest) {
-  const { userId, sessionId } = await request.json();
-
-  const session = await stripe.checkout.sessions.retrieve(sessionId);
-
-  if (session.payment_status !== "paid") return;
-  if (session.metadata?.creditsProcessed === "true") return; // already done
-
-  // Mark as processed
-  await stripe.checkout.sessions.update(sessionId, {
-    metadata: { ...session.metadata, creditsProcessed: "true" },
-  });
-
-  // Add credits
-  const { $users } = await adminDb.query({
-    $users: { $: { where: { id: userId } } },
-  });
-  await adminDb.transact(
-    adminDb.tx.$users[userId].update({
-      credits: ($users[0]?.credits || 0) + CREDITS_PER_PACK,
-    })
-  );
-}
-```
-
-Both webhook and sync share the same idempotency mechanism — whichever runs first sets the flag, the other skips.
-
-| Location | Why |
-|----------|-----|
-| Webhook | Primary fulfillment path |
-| Success page sync | Beats the webhook race for instant feedback |
-
 ## Spending credits
 
-The generate API checks the balance, deducts a credit, and creates the content in a single transaction:
+The generate API verifies the caller's identity, checks the balance, deducts a credit, and creates the content in a single transaction:
 
 ```ts
 // src/app/api/generate/route.ts
 export async function POST(request: NextRequest) {
-  const { userId, topic } = await request.json();
+  // Verify auth — userId comes from the token, not the request body
+  const auth = await verifyAuth(request);
+  if (auth.error) return auth.error;
+  const userId = auth.user.id;
+
+  const { topic } = await request.json();
 
   const { $users } = await adminDb.query({
     $users: { $: { where: { id: userId } } },
@@ -342,7 +303,7 @@ export async function POST(request: NextRequest) {
 }
 ```
 
-The credit check and deduction happen server-side via the admin SDK. Clients can't manipulate their balance.
+The user ID comes from the verified auth token — not from the request body. Clients can't impersonate other users or manipulate their balance.
 
 The client handles a `402` response by opening the purchase modal:
 
@@ -454,7 +415,21 @@ await stripe.checkout.sessions.update(session.id, {
 await addCredits(userId, CREDITS_PER_PACK);
 ```
 
-### 3. Client-side credit enforcement only
+### 3. Trusting client-provided user IDs
+
+Never take the user ID from the request body — anyone can send any ID. Use `verifyAuth` to derive the user ID from a verified token:
+
+```ts
+// BAD - Anyone can impersonate any user
+const { userId } = await request.json();
+
+// GOOD - User ID comes from verified auth token
+const auth = await verifyAuth(request);
+if (auth.error) return auth.error;
+const userId = auth.user.id;
+```
+
+### 4. Client-side credit enforcement only
 
 Never trust the client to enforce credit limits:
 
@@ -467,7 +442,7 @@ const currentCredits = user.credits || 0;
 if (currentCredits < 1) return 402;
 ```
 
-### 4. Not setting up the production webhook
+### 5. Not setting up the production webhook
 
 Your webhook works locally with `stripe listen`, but you need to add it in the [Stripe Dashboard](https://dashboard.stripe.com/webhooks) for production. Add `https://your-app.com/api/stripe/webhook` and select only `checkout.session.completed`.
 
@@ -475,12 +450,13 @@ Your webhook works locally with `stripe listen`, but you need to add it in the [
 
 You now have a usage-based payment system with:
 
+- Token-verified API routes (no user impersonation)
 - Stripe Checkout for credit packs
-- Idempotent webhook + sync fulfillment
+- Idempotent webhook fulfillment (re-fetches session for correct retry handling)
 - Server-side credit deduction via InstantDB admin SDK
-- Real-time balance updates
+- Real-time balance updates via InstantDB subscriptions
 - Author-scoped content via permissions
 
-The best part? Credit enforcement and content permissions happen server-side. Even if someone inspects your client code, they can't bypass it.
+The best part? Auth verification, credit enforcement, and content permissions all happen server-side. Even if someone inspects your client code, they can't bypass it.
 
 For more Stripe features like tiered pricing, volume discounts, or metered billing, check out the [Stripe docs](https://stripe.com/docs).
