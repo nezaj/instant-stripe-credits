@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Create Instant App',
-  description: 'Instant DB Starter App',
+  title: 'Haiku Generator',
+  description: 'Generate beautiful haikus with credits',
 };
 
 export default function RootLayout({

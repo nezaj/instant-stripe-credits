@@ -3,22 +3,15 @@
 import type { InstantRules } from "@instantdb/react";
 
 const rules = {
-  /**
-   * Welcome to Instant's permission system!
-   * Right now your rules are empty. To start filling them in, check out the docs:
-   * https://www.instantdb.com/docs/permissions
-   *
-   * Here's an example to give you a feel:
-   * posts: {
-   *   allow: {
-   *     view: "true",
-   *     create: "isOwner",
-   *     update: "isOwner",
-   *     delete: "isOwner",
-   *   },
-   *   bind: ["isOwner", "auth.id != null && auth.id == data.ownerId"],
-   * },
-   */
+  haikus: {
+    allow: {
+      view: "isAuthor",
+      create: "false", // Created via admin SDK
+      update: "false",
+      delete: "isAuthor",
+    },
+    bind: ["isAuthor", "auth.id in data.ref('author.id')"],
+  },
 } satisfies InstantRules;
 
 export default rules;

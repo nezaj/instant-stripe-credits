@@ -10,35 +10,22 @@ const _schema = i.schema({
     }),
     $users: i.entity({
       email: i.string().unique().indexed().optional(),
-      imageURL: i.string().optional(),
-      type: i.string().optional(),
+      credits: i.number().optional(), // Current credit balance
+      stripeCustomerId: i.string().optional(),
     }),
-    todos: i.entity({
-      text: i.string(),
-      done: i.boolean(),
-      createdAt: i.number(),
+    haikus: i.entity({
+      topic: i.string(),
+      content: i.string(),
+      createdAt: i.number().indexed(),
     }),
   },
   links: {
-    $usersLinkedPrimaryUser: {
-      forward: {
-        on: "$users",
-        has: "one",
-        label: "linkedPrimaryUser",
-        onDelete: "cascade",
-      },
-      reverse: {
-        on: "$users",
-        has: "many",
-        label: "linkedGuestUsers",
-      },
+    userHaikus: {
+      forward: { on: "haikus", has: "one", label: "author", onDelete: "cascade" },
+      reverse: { on: "$users", has: "many", label: "haikus" },
     },
   },
-  rooms: {
-    todos: {
-      presence: i.entity({}),
-    },
-  },
+  rooms: {},
 });
 
 // This helps TypeScript display nicer intellisense
