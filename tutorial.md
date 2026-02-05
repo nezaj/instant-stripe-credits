@@ -248,7 +248,9 @@ Copy the webhook signing secret (`whsec_...`) to `STRIPE_WEBHOOK_SECRET`.
 
 For production, add the endpoint in [Stripe Dashboard](https://dashboard.stripe.com/webhooks):
 - URL: `https://your-app.com/api/stripe/webhook`
-- Events: `checkout.session.completed`
+- Events: just `checkout.session.completed`
+
+Unlike subscriptions which need multiple events for lifecycle changes, credit packs only need this single event — it fires when a one-time payment completes.
 
 ## The sync strategy
 
@@ -467,7 +469,7 @@ if (currentCredits < 1) return 402;
 
 ### 4. Not setting up the production webhook
 
-Your webhook works locally with `stripe listen`, but you need to add it in the [Stripe Dashboard](https://dashboard.stripe.com/webhooks) for production.
+Your webhook works locally with `stripe listen`, but you need to add it in the [Stripe Dashboard](https://dashboard.stripe.com/webhooks) for production. Add `https://your-app.com/api/stripe/webhook` and select only `checkout.session.completed`.
 
 ## Fin
 

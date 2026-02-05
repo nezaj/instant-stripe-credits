@@ -37,6 +37,9 @@ stripe.checkout.sessions.create({
 ```
 
 **2. Webhook** — Add credits on successful payment
+
+Only one event needed: `checkout.session.completed`. Unlike subscriptions, there's no ongoing lifecycle to track.
+
 ```ts
 // checkout.session.completed
 if (session.metadata?.creditsProcessed === "true") break; // idempotent
